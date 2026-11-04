@@ -17,44 +17,50 @@ learned the hard way. Works for any stack (web app, API, mobile backend): swap t
 ## Step 0 — Target and scope (always, before any agent)
 
 ```
-git fetch origin
-gh pr view <N> --json headRefName,headRefOid,title,state
-git diff <base>...<head> --name-status        # the TRUE delta
-git log --oneline <base>...<head> | head
+gh pr view <N> --json baseRefName,headRefName,headRefOid,title,state,isDraft,isCrossRepository,changedFiles
+git fetch origin <baseRefName> "pull/<N>/head"   # works for fork PRs too
+BASE=origin/<baseRefName>; HEAD=<headRefOid>
+git diff $BASE...$HEAD --name-status             # the TRUE delta
+git log --oneline $BASE..$HEAD | head            # two dots: commits only on the PR
+# If the fetch fails (no SSH/network): gh pr diff <N> [--name-only]; gh api 'repos/{owner}/{repo}/pulls/<N>/files'
 ```
 
+- **Never assume `main`**: the base is `baseRefName` (many repos target `dev`/`develop`/release branches).
+- **Draft PR**: confirm with the user before spending agents.
+- **Release/promotion PRs** (e.g. dev→main): review only commits not already reviewed in their own PRs.
+- **Dependency-only PRs** (lockfile/dependabot): one agent (dependency trust + CI result), or skip.
+- **Large PRs** (over ~60 files or ~3k lines): split by top-level service/package, one agent per service per lens
+  group.
+- **Work in a worktree at the head SHA** (`git worktree add --detach /tmp/<pr>-review <sha>`); the main checkout
+  is often on another branch, behind, or dirty — never read it as if it were the PR.
 - **Stacked-PR trap**: if the branch contains another open PR's commits, review the *delta beyond that PR's
   tip*, not vs main — and say so in every review body ("reviewers should read the X..Y delta").
-- Find prior in-repo review reports (e.g. `docs/dev/reviews/`) — agents must read them first and confirm,
-  not re-report.
+- Collect prior review: in-repo reports (search for `*review*`, ADRs), **existing PR reviews/comments including
+  bots** (`gh api 'repos/{owner}/{repo}/pulls/<N>/reviews'` and `.../comments`), and **CI results**
+  (`gh pr checks <N>`). Agents read them first and confirm, not re-report; they don't re-run what CI already
+  proved green at this SHA.
 - Build the **known-findings recap** (this PR's + carried-over history). Every agent brief gets it.
 - Record the PR head SHA. Branches move mid-review; findings must anchor to the reviewed SHA, and you re-diff
   before posting if the head changed.
 - **Lens triage (from the same `--name-status` output — no agent needed):** bucket the changed files by
-  class — core code, UI, deploy/CI/config, tests, docs. A lens with no files in its class is **dropped**,
+  class — core code, agent/prompt (prompts, tool schemas/descriptions, agent configs, eval rubrics), UI,
+  deploy/CI/config/infra, tests, docs. Classify by role, not extension: a `.md` loaded as a prompt is agent
+  code. In a monorepo, tag each file with its service; each service has its own test command (read the
+  justfile/Makefile/CI config). A lens with no files in its class is **dropped**,
   not downweighted. The surviving lenses are grouped per lenses.md, and each group's agent is scoped to its
   own file subset (`git diff <base>...<head> -- <files>`), not the whole delta. This is the token lever:
   every fresh agent otherwise re-reads the full diff and the same hot files.
 
 ## Step 1 — Round plan
 
-Roster, grouping, and lens briefs live in [lenses.md](lenses.md). Default shape for a large PR is **four
-agents, two waves** (fewer for small PRs — triage decides; a 10-file bugfix may need one):
-
-| Group | One agent covering | Shares |
-|---|---|---|
-| A | backend/business-logic + architecture/plan (+ forward-compat) | core-code + plan-doc reading |
-| B | security + devops/ops (+ frontend/a11y only if triage shows UI files) | endpoints, config, deploy path |
-| C | tests + **empirical execution** | the suite + scratch-DB setup |
-| D | **Adversarial verification** + **ship-gate** | the verified-findings record A–C produced |
-| (E) | Fix-batch verifier + ship-gate again | After the user says "fixed" |
+Roster, grouping (groups A–D), and lens briefs live in [lenses.md](lenses.md). Default shape for a large PR is
+**four agents, two waves** (fewer for small PRs — triage decides; a 10-file bugfix may need one). After the
+user says "fixed", a group E runs: fix-batch verifier + ship-gate again (Step 5).
 
 A–C are independent lenses: fire them **concurrently**. D fires only when A–C are fully posted, so its
 brief includes their findings (plus a slot for whatever they surfaced).
 
 Rules that made the campaign work:
-- Fire A–C concurrently (independent lenses); fire D only when A–C are fully posted, so D's brief includes
-  their findings.
 - Every agent gets: the exact diff command, the known-findings recap, "read prior reports first, don't
   re-report", and the deliverable format. Template: [agent-brief-template.md](agent-brief-template.md).
 - **Use fresh subagents, not forks.** A fork inherits your whole conversation as its starting context — in a
@@ -76,9 +82,12 @@ Fill the template per lens group. Non-negotiables in every brief:
 3. **Evidence bar**: every finding verified at the PR head with file:line; "quality over quantity; if a check
    comes back clean, say so in prose instead of padding".
 4. **Safety**: read-only; mutations only in a throwaway worktree (`git worktree add --detach /tmp/... `,
-   removed after); destructive probes only on a **scratch DB/resource they create** (sibling agents share the
-   default test DB — collisions produce false failures; this bit us twice); no commits, no GitHub posting
-   (the orchestrator posts).
+   removed after); destructive probes only on **resources they create** (scratch DB, schema, bucket, queue,
+   emulator namespace — sibling agents share the defaults, and collisions produce false failures; this bit us
+   twice). Never stop/reset shared emulators or containers (LocalStack, docker compose, etc.); use port
+   overrides and assume siblings hold the default ports. Real-model/paid API calls only if the user allowed
+   them, capped to N calls. Repos with only in-process mocks need no scratch resource — say so in the brief.
+   No commits, no GitHub posting (the orchestrator posts).
 5. **Ground truth marking**: empirically-confirmed and mutation-proven findings are marked GT so the
    adversarial pass doesn't waste effort re-running them.
 
@@ -101,12 +110,14 @@ Verdict tables, run-logs and fix reports go as plain PR comments.
 
 ```bash
 # ALWAYS validate the payload first — a bad quote or a "file" key instead of "path" is a 400/422:
-jq . /tmp/review.json > /dev/null && gh api repos/<owner>/<repo>/pulls/<N>/reviews --input /tmp/review.json
+jq . /tmp/review.json > /dev/null && gh api 'repos/{owner}/{repo}/pulls/<N>/reviews' --input /tmp/review.json
 # GitHub does not echo comment counts — verify after:
-gh api repos/<owner>/<repo>/pulls/<N>/comments --jq '[.[] | select(.pull_request_review_id == <id>) | {path, line}]'
+gh api 'repos/{owner}/{repo}/pulls/<N>/comments' --jq '[.[] | select(.pull_request_review_id == <id>) | {path, line}]'
 ```
 
-Payload shape: `{"body": "...", "event": "COMMENT", "comments": [{"path", "line", "body"}]}`.
+Payload shape: `{"commit_id": "<reviewed sha>", "body": "...", "event": "COMMENT", "comments": [{"path", "line", "side": "RIGHT", "body"}]}`.
+Always set `commit_id` — without it, comments attach to whatever the head is at posting time. (`gh` fills
+`{owner}/{repo}` from the current repo.)
 Findings comment body: **bold claim**, **failure scenario** (concrete: who does what, what breaks), **Fix**.
 Comment bodies end with the attribution line your harness requires.
 
@@ -128,8 +139,9 @@ When the user says "fixed":
 
 - **Anchor to a SHA, not a branch.** Branches move mid-review; re-diff at the PR head before posting and say
   which SHA findings were verified at.
-- **Sibling test-DB collisions**: concurrent agents running the suite against the same DB produce convincing
-  false failures. Every agent that runs tests gets its own scratch DB, created and dropped.
+- **Sibling shared-resource collisions**: concurrent agents running the suite against the same DB, emulator,
+  or fixed port produce convincing false failures. Every agent that runs tests gets its own scratch resource
+  (DB, namespace, port), created and dropped — and never resets a shared one.
 - **Mutations beat coverage opinions**: "does any test catch X?" is answered by deleting X and running the
   suite, not by reading tests. Mutation survivors are the best test findings.
 - **Empirical execution finds what reading cannot** (three deploy blockers across the campaign, all
@@ -148,4 +160,4 @@ When the user says "fixed":
 - **Bodies carry the record**: sound-checks, run-logs, verdict tables. Six months later the PR thread is the
   campaign's memory.
 - **A stale subagent entry** ("waiting on background work") in the UI is usually a finished agent whose last
-  child process was still exiting — check `ListAgents`/`pgrep` before worrying.
+  child process was still exiting — check your harness's agent list and `pgrep` before worrying.

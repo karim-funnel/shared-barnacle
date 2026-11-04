@@ -1,6 +1,6 @@
 # The lens roster
 
-Seven core reviewers plus three verification stages. Adapt the specifics to the stack (the right column is
+Eight core reviewers plus three verification stages. Adapt the specifics to the stack (the right column is
 stack-agnostic). Not every PR needs all of them — the Step 0 triage kills any lens with no files in its
 class before an agent is launched; a backend-only PR skips frontend entirely.
 
@@ -12,14 +12,13 @@ intact:
 
 - **A — correctness**: backend/business-logic + architecture/plan + forward-compat (all read the core code
   and the plan docs).
-- **B — attack surface**: security + devops/ops (+ frontend/a11y only if triage shows UI files).
+- **B — attack surface**: security + devops/ops (+ frontend/a11y only if triage shows UI files; + agent/LLM surface only if triage shows agent/prompt files).
 - **C — proof**: tests & integration + empirical execution (they share the suite and scratch-DB setup).
 - **D — verdict**: adversarial verification + ship-gate (ship-gate reads exactly what adversarial just
   verified).
 
 Group only lenses that share reading material, and cap at two or three — "general correctness + security +
-tests" in one brief produces shallow all three. A–C are independent: fire them concurrently. D fires only
-after A–C are posted.
+tests" in one brief produces shallow all three. (Firing order: see SKILL.md Step 1.)
 
 ## Core lenses
 
@@ -49,6 +48,7 @@ Claims the tests prove what they claim.
 - Fix-pinning: do previously-fixed bugs have regression tests?
 - Integration with the existing skeleton: new code vs established seams; does anything regress a prior fix?
 - Coverage honesty: which tests silently skip in CI; DB/service dependencies handled fail-not-skip.
+- Prompt/agent behaviour changes: are there evals, and do they run in CI?
 
 ### 4. Security (group B)
 - AuthN/AuthZ per endpoint (IDOR, object-level checks re-derived server-side, never trusting client state).
@@ -85,6 +85,22 @@ Claims the next 3 planned changes don't force rework of this one.
 - Scale cliffs: what breaks at 10× data / 10× users (paginate-vs-fanout, per-item work).
 - Migration/upgrade chains: does the next step stack cleanly on this one?
 
+### 11. Agent / LLM surface (group B — only if triage shows agent/prompt files)
+Claims the agent can only do what it should, at a bounded cost. Give it a separate agent when the
+agent/prompt class is large.
+- Tool permissions: diff each agent's allowed tools; every new tool's blast radius (writes, outbound
+  messages, code execution, spawning tasks/agents). Least privilege per agent, enforced in code, not prompt.
+- Prompt injection: trace untrusted text (user data, task history, tool results, files, web) into prompts
+  that hold privileged tools. Can retrieved content trigger send/create/delete?
+- Runaway loops and cost: caps on iterations, spawned tasks/subagents, retries, tokens; idempotency of
+  side-effecting tools under model retries; what stops an always-on agent creating 1000 tasks?
+- Tool contracts: schema/description vs handler behavior; errors returned to the model are recoverable and
+  leak no internals; identity/tenant derived server-side, never from model-supplied args.
+- Secrets/PII: prompts, tool args/results, traces and logs; what reaches the model provider.
+- Nondeterminism: tests assert on structure, not model wording; prompt changes covered by evals (name the
+  eval suite) or flagged as unevaluated; model-ID/config changes per env.
+- Env gating: dev-only agents/features gated mechanically in every layer (API, UI, infra).
+
 ## Verification stages (groups C–D)
 
 ### 8. Empirical execution (group C)
@@ -92,6 +108,8 @@ Run the thing. Clone/setup in a scratch environment, drive the user flows, captu
 timings, and response headers; reproduce failure paths deliberately. Findings classes reading can't reach:
 boot failures, wrong default configs, broken deploy sequences, "works in tests, dead in prod shape".
 Also: confirm/refute earlier findings with evidence — a confirmed finding with verbatim output is unarguable.
+If the stack can't boot without interactive credentials, say so as a residual blind spot — don't fake it
+with mocks.
 
 ### 9. Adversarial verification (group D)
 Assume every finding is wrong; try to refute each (counter-evidence, alternate explanations, unreachable
@@ -102,7 +120,8 @@ change to actually close). Expect: findings narrowed, strengthened, occasionally
 finding is as valuable as confirming it.
 
 ### 10. Ship-gate (group D)
-One question: merge now? Read the whole fixed/current state, verify fix interactions and collateral, sort
+One question: merge now? First determine what merge triggers (read the CD workflow's `on:`) — if merging to
+the base auto-deploys, every deploy-gate finding is merge-blocking. Read the whole fixed/current state, verify fix interactions and collateral, sort
 all findings into blocks-merge / before-deploy / ride-along, and rule: MERGE / MERGE-WITH-N / DO-NOT-MERGE.
 Key judgment: "deploy-gate findings don't block a merge" holds **unless the PR's own merge performs the
 unsafe act** (a deploy step or migration that runs on merge) — then the gate must be mechanical in this PR.
