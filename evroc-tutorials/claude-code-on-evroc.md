@@ -27,13 +27,14 @@ Without it, the CLI auto-creates a key from your login session. The key's name i
 claude-evroc() {
   # In $HOME, ~/.claude/ counts as project settings, so ignore project/local sources there
   local extra=()
-  [[ "$PWD" == "$HOME" ]] && extra=(-- --setting-sources user)
+  [[ "$PWD" == "$HOME" ]] && extra=(--setting-sources user)
+  # Everything after `--` goes to claude (e.g. --resume, -c); evroc rejects unknown flags otherwise
   CLAUDE_CONFIG_DIR="$HOME/.claude-evroc" \
-    evroc think code claude --model zai-org/GLM-5.3 "${extra[@]}" "$@"
+    evroc think code claude --model zai-org/GLM-5.3 -- "${extra[@]}" "$@"
 }
 ```
 
-Then `source ~/.zshrc` and run `claude-evroc`.
+Then `source ~/.zshrc` and run `claude-evroc`. Claude Code flags pass straight through, e.g. `claude-evroc --resume`.
 
 `evroc think code claude` sets `ANTHROPIC_BASE_URL` and the API key for Claude Code and starts a local Anthropic-to-OpenAI translation proxy. You don't configure an endpoint yourself.
 
@@ -42,5 +43,7 @@ Then `source ~/.zshrc` and run `claude-evroc`.
 - **Use the alias name for `--model`, not the listed ID.** `evroc think sharedmodel list` shows `nvidia-glm-5-3-nvfp4`, but the proxy rejects it. Use `zai-org/GLM-5.3`. `evroc think sharedmodel list -o json` shows each model's aliases.
 - **Use a separate `CLAUDE_CONFIG_DIR` per backend** (here `~/.claude-evroc`). Otherwise your normal `~/.claude/settings.json` leaks in. In our case that was `CLAUDE_CODE_USE_BEDROCK=1`, which sent requests to Bedrock and produced a 400 "The provided model identifier is invalid" error that looks like a bad model name.
 - **Launching from `$HOME` leaks settings anyway.** There, `~/.claude/` is read as project settings, hence `--setting-sources user` in the function.
+- **Always put `--` before Claude Code flags.** Without it, the evroc CLI parses them itself and fails with e.g. `unknown flag: --resume`. The function adds it for you.
+- **`--resume` only lists `claude-evroc` sessions.** They live in `~/.claude-evroc`, separate from plain `claude` sessions.
 - **Don't switch models with `/model` in a leaking session.** It can persist `"model": "zai-org/GLM-5.3"` into the normal `~/.claude/settings.json` and break plain `claude`. Remove that line if it happens.
 - **Protect your API key.** Keep `~/.zshrc` out of public dotfiles repos, or move the key to an untracked file.
